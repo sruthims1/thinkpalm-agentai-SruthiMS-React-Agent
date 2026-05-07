@@ -11,17 +11,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-# ── .env loader ────────────────────────────────────────────────────────────────
-_env_file = Path(__file__).parent.parent / ".env"
-if _env_file.exists():
-    for _line in _env_file.read_text(encoding="utf-8").splitlines():
-        _line = _line.strip()
-        if _line and not _line.startswith("#") and "=" in _line:
-            _k, _, _v = _line.partition("=")
-            os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
+# Fix 1: use python-dotenv instead of manual parser
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).parent.parent / ".env")
 
-_api_key = os.environ.get("ANTHROPIC_API_KEY")
-if not _api_key:
+if not os.environ.get("ANTHROPIC_API_KEY"):
     raise SystemExit(
         "\n[ERROR] ANTHROPIC_API_KEY not set.\n"
         "Create a .env file in the project root:\n"
@@ -36,6 +30,9 @@ MODEL       = "claude-sonnet-4-6"
 MAX_STEPS   = 10
 MAX_RETRIES = 3
 TRACE_DIR   = Path(__file__).parent.parent / "screenshots"
+
+_W       = 62
+_DIVIDER = "─" * _W
 
 SYSTEM_PROMPT = """\
 You are a ReAct (Reasoning + Acting) agent with access to a suite of powerful tools.
@@ -74,47 +71,6 @@ DEMO_QUERIES = [
 ]
 
 # ── Output helpers ─────────────────────────────────────────────────────────────
-_W         = 62          # inner box width
-_DIVIDER   = "─" * _W
-_VERBOSE   = False
-_QUIET     = False
-_CHAT_MODE = False
-
-
-def _emit(text: str, lines: list, display: str | None = None) -> None:
-    """Append full text to trace; print display version (or full text) unless quiet mode suppresses it."""
-    lines.append(text)
-    shown = display if display is not None else text
-
-    if _CHAT_MODE:
-        if _VERBOSE:
-            # Show full THOUGHT / ACTION / OBSERVATION steps.
-            # Suppress only the QUERY header, FINAL ANSWER section, and EXECUTION SUMMARY.
-            if "FINAL ANSWER" in text:
-                return
-            if text.strip().startswith("╔"):
-                return
-            # Suppress the ══ QUERY: ══ banner (starts with newline then ═)
-            stripped = text.lstrip("\n")
-            if stripped.startswith("═") and "QUERY:" in text:
-                return
-            print(shown)
-        else:
-            # Compact mode: one-line tool indicator only.
-            if "ACTION" in text and "Tool  :" in text:
-                for line in text.splitlines():
-                    if line.strip().startswith("Tool"):
-                        tool_name = line.split(":", 1)[-1].strip()
-                        print(f"  [Using {tool_name}...]")
-                        break
-        return
-
-    if _QUIET:
-        if "FINAL ANSWER" in text or text.strip().startswith("╔"):
-            print(shown)
-        return
-    print(shown)
-
 
 def _box(label: str, content: str) -> str:
     """Format a labelled section block for terminal and trace output."""
@@ -139,98 +95,80 @@ def _summary_box(step: int, tools_summary: str, elapsed: float, status: str) -> 
     ])
 
 
-# ── PNG renderer ───────────────────────────────────────────────────────────────
+# ── PNG renderer (Fix 3: split into focused helpers) ───────────────────────────
 
-def _save_png(trace_lines: list[str], path: Path) -> bool:
-    """Render the trace as a dark-themed terminal PNG. Returns True on success."""
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-    except ImportError:
-        return False
-
-    # ── Font ──────────────────────────────────────────────────────────────────
-    font_size = 14
-    font: ImageFont.FreeTypeFont | ImageFont.ImageFont | None = None
+def _make_font(size: int = 14):
+    """Load a monospace font from common OS paths, falling back to PIL default."""
+    from PIL import ImageFont
     for fp in [
-        "C:/Windows/Fonts/consola.ttf",   # Consolas (Windows)
-        "C:/Windows/Fonts/cour.ttf",      # Courier New (Windows)
+        "C:/Windows/Fonts/consola.ttf",
+        "C:/Windows/Fonts/cour.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         "/System/Library/Fonts/Menlo.ttc",
     ]:
         try:
-            font = ImageFont.truetype(fp, font_size)
-            break
+            return ImageFont.truetype(fp, size)
         except (IOError, OSError):
             pass
-    if font is None:
-        font = ImageFont.load_default()
+    return ImageFont.load_default()
 
-    # ── Color scheme (VS Code Dark+) ──────────────────────────────────────────
-    BG          = (30,  30,  30)
-    C_DEFAULT   = (212, 212, 212)
-    C_BORDER    = ( 80,  80,  90)
-    C_QUERY     = ( 86, 156, 214)   # blue   — QUERY banner
-    C_THOUGHT   = (156, 220, 254)   # sky    — THOUGHT
-    C_ACTION    = (206, 145, 120)   # orange — ACTION
-    C_OBSERVE   = (106, 153,  85)   # green  — OBSERVATION
-    C_ANSWER    = ( 78, 201, 176)   # teal   — FINAL ANSWER
-    C_SUMMARY   = (220, 220, 100)   # yellow — EXECUTION SUMMARY
+
+def _colorize_lines(raw_text: str) -> list[tuple[str, tuple]]:
+    """Assign a VS Code Dark+ color to each line based on its ReAct section."""
+    C_DEFAULT = (212, 212, 212)
+    C_BORDER  = ( 80,  80,  90)
+    C_QUERY   = ( 86, 156, 214)
+    C_THOUGHT = (156, 220, 254)
+    C_ACTION  = (206, 145, 120)
+    C_OBSERVE = (106, 153,  85)
+    C_ANSWER  = ( 78, 201, 176)
+    C_SUMMARY = (220, 220, 100)
 
     SECTION_COLORS = {
-        "thought":  C_THOUGHT,
-        "action":   C_ACTION,
-        "observe":  C_OBSERVE,
-        "answer":   C_ANSWER,
-        "summary":  C_SUMMARY,
+        "thought": C_THOUGHT, "action": C_ACTION, "observe": C_OBSERVE,
+        "answer":  C_ANSWER,  "summary": C_SUMMARY,
     }
 
     def _color(line: str, section: str) -> tuple:
-        stripped = line.strip()
-        if not stripped:
-            return C_DEFAULT
-        if all(c in "═─╔╗╠╣╚╝║ " for c in stripped):
-            return C_BORDER
-        if "QUERY:" in line:
-            return C_QUERY
-        if "THOUGHT" in line and line.strip().startswith("[Step"):
-            return C_THOUGHT
-        if "ACTION" in line and line.strip().startswith("[Step"):
-            return C_ACTION
-        if "OBSERVATION" in line and line.strip().startswith("[Step"):
-            return C_OBSERVE
-        if "FINAL ANSWER" in line:
-            return C_ANSWER
-        if "EXECUTION SUMMARY" in line:
-            return C_SUMMARY
+        s = line.strip()
+        if not s:                                              return C_DEFAULT
+        if all(c in "═─╔╗╠╣╚╝║ " for c in s):               return C_BORDER
+        if "QUERY:" in line:                                   return C_QUERY
+        if "THOUGHT" in line and s.startswith("[Step"):        return C_THOUGHT
+        if "ACTION" in line and s.startswith("[Step"):         return C_ACTION
+        if "OBSERVATION" in line and s.startswith("[Step"):    return C_OBSERVE
+        if "FINAL ANSWER" in line:                             return C_ANSWER
+        if "EXECUTION SUMMARY" in line:                        return C_SUMMARY
         return SECTION_COLORS.get(section, C_DEFAULT)
 
-    # ── Determine section per line ────────────────────────────────────────────
-    raw_lines = "\n".join(trace_lines).splitlines()
-    section   = "default"
+    section = "default"
     colored: list[tuple[str, tuple]] = []
-    for line in raw_lines:
-        if "THOUGHT" in line:   section = "thought"
-        elif "ACTION" in line:  section = "action"
-        elif "OBSERVATION" in line: section = "observe"
-        elif "FINAL ANSWER" in line: section = "answer"
+    for line in raw_text.splitlines():
+        if "THOUGHT" in line:            section = "thought"
+        elif "ACTION" in line:           section = "action"
+        elif "OBSERVATION" in line:      section = "observe"
+        elif "FINAL ANSWER" in line:     section = "answer"
         elif "EXECUTION SUMMARY" in line: section = "summary"
         elif line.strip().startswith("╚"): section = "default"
         colored.append((line, _color(line, section)))
+    return colored
 
-    # ── Measure dimensions ────────────────────────────────────────────────────
-    PAD         = 24
-    LINE_H      = font_size + 5
-    dummy_img   = Image.new("RGB", (1, 1))
-    dummy_draw  = ImageDraw.Draw(dummy_img)
-    max_w       = max(
-        (int(dummy_draw.textlength(ln, font=font)) for ln, _ in colored if ln.strip()),
-        default=400,
-    )
-    img_w = max_w + PAD * 2
-    img_h = len(colored) * LINE_H + PAD * 2
 
-    # ── Draw ──────────────────────────────────────────────────────────────────
-    img  = Image.new("RGB", (img_w, img_h), BG)
+def _save_png(trace_lines: list[str], path: Path) -> bool:
+    """Render the trace as a dark-themed terminal PNG. Returns True on success."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return False
+
+    font    = _make_font()
+    colored = _colorize_lines("\n".join(trace_lines))
+
+    PAD, LINE_H, BG = 24, 19, (30, 30, 30)
+    dummy = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    max_w = max((int(dummy.textlength(ln, font=font)) for ln, _ in colored if ln.strip()), default=400)
+
+    img  = Image.new("RGB", (max_w + PAD * 2, len(colored) * LINE_H + PAD * 2), BG)
     draw = ImageDraw.Draw(img)
     for i, (line, color) in enumerate(colored):
         draw.text((PAD, PAD + i * LINE_H), line, font=font, fill=color)
@@ -242,16 +180,46 @@ def _save_png(trace_lines: list[str], path: Path) -> bool:
 # ── ReAct Agent ────────────────────────────────────────────────────────────────
 
 class ReActAgent:
-    """ReAct agent that interleaves Claude's reasoning with tool calls until a final answer is reached."""
+    """ReAct agent that interleaves reasoning with tool calls until a final answer is reached."""
 
-    def __init__(self, model: str = MODEL, max_steps: int = MAX_STEPS):
-        self.client    = anthropic.Anthropic(api_key=_api_key)
-        self.model     = model
-        self.max_steps = max_steps
+    # Fix 2: verbose/quiet as constructor params; no mutable module globals
+    def __init__(self, model: str = MODEL, max_steps: int = MAX_STEPS,
+                 verbose: bool = False, quiet: bool = False):
+        self.client     = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+        self.model      = model
+        self.max_steps  = max_steps
+        self.verbose    = verbose
+        self.quiet      = quiet
+        self._chat_mode = False
 
-    # ── Retry wrapper ──────────────────────────────────────────────────────────
+    def _emit(self, text: str, lines: list, display: str | None = None) -> None:
+        """Append to trace and print according to current display mode."""
+        lines.append(text)
+        shown = display if display is not None else text
+
+        if self._chat_mode:
+            if self.verbose:
+                if "FINAL ANSWER" in text or text.strip().startswith("╔"):
+                    return
+                if text.lstrip("\n").startswith("═") and "QUERY:" in text:
+                    return
+                print(shown)
+            else:
+                if "ACTION" in text and "Tool  :" in text:
+                    for line in text.splitlines():
+                        if line.strip().startswith("Tool"):
+                            print(f"  [Using {line.split(':', 1)[-1].strip()}...]")
+                            break
+            return
+
+        if self.quiet:
+            if "FINAL ANSWER" in text or text.strip().startswith("╔"):
+                print(shown)
+            return
+        print(shown)
+
     def _call_api(self, messages: list) -> anthropic.types.Message:
-        """Call the Claude API with exponential backoff on rate-limit and server errors."""
+        """Call the API with exponential backoff on rate-limit and server errors."""
         delay = 1
         for attempt in range(MAX_RETRIES):
             try:
@@ -277,118 +245,73 @@ class ReActAgent:
                 else:
                     raise
 
-    # ── Main loop ──────────────────────────────────────────────────────────────
     def run(self, query: str, save_trace: bool = True,
             _prior_messages: list | None = None) -> str:
-        """Run the Thought→Action→Observation loop for a query; returns the final answer string."""
+        """Run the Thought→Action→Observation loop; returns the final answer string."""
         trace_lines: list[str] = []
         tool_stats: dict[str, int] = defaultdict(int)
         start_time = time.time()
 
-        header = f"\n{'═' * _W}\nQUERY: {query}\n{'═' * _W}"
-        _emit(header, trace_lines)
+        self._emit(f"\n{'═' * _W}\nQUERY: {query}\n{'═' * _W}", trace_lines)
 
         messages = list(_prior_messages) if _prior_messages else []
         messages.append({"role": "user", "content": query})
-        step          = 0
-        final_answer  = ""
+        step, final_answer = 0, ""
 
         while step < self.max_steps:
             step += 1
-
             response = self._call_api(messages)
 
-            assistant_blocks = []
-            thought_text     = ""
-            text_output      = ""
-            tool_calls       = []
-
+            thought_text, text_output, tool_calls, assistant_blocks = "", "", [], []
             for block in response.content:
                 assistant_blocks.append(block)
-                if block.type == "thinking":
-                    thought_text += block.thinking
-                elif block.type == "text":
-                    text_output += block.text
-                elif block.type == "tool_use":
-                    tool_calls.append(block)
+                if block.type == "thinking":   thought_text += block.thinking
+                elif block.type == "text":     text_output  += block.text
+                elif block.type == "tool_use": tool_calls.append(block)
 
-            # Show THOUGHT block from extended thinking only (not pre-tool narrative text)
             if thought_text:
-                full_thought = thought_text.strip()
-                preview = full_thought if len(full_thought) <= 350 else full_thought[:350] + f"\n... [{len(full_thought)-350} chars — full in trace]"
-                _emit(
-                    _box(f"[Step {step}]  THOUGHT", full_thought),
-                    trace_lines,
-                    display=_box(f"[Step {step}]  THOUGHT", preview),
-                )
+                full = thought_text.strip()
+                preview = full if len(full) <= 350 else full[:350] + f"\n... [{len(full)-350} chars — full in trace]"
+                self._emit(_box(f"[Step {step}]  THOUGHT", full), trace_lines,
+                           display=_box(f"[Step {step}]  THOUGHT", preview))
 
-            # No tool calls → final answer
             if not tool_calls:
                 final_answer = text_output.strip()
-                _emit(
-                    f"\n{'═' * _W}\nFINAL ANSWER\n{_DIVIDER}\n{final_answer}\n{'═' * _W}",
-                    trace_lines,
-                )
+                self._emit(f"\n{'═'*_W}\nFINAL ANSWER\n{_DIVIDER}\n{final_answer}\n{'═'*_W}", trace_lines)
                 break
 
             messages.append({"role": "assistant", "content": assistant_blocks})
-
             tool_results = []
             for tc in tool_calls:
                 tool_stats[tc.name] += 1
-
-                _emit(
-                    _box(
-                        f"[Step {step}]  ACTION",
-                        f"Tool  : {tc.name}\nInput : {json.dumps(tc.input, indent=2)}",
-                    ),
-                    trace_lines,
-                )
-
+                self._emit(_box(f"[Step {step}]  ACTION",
+                                f"Tool  : {tc.name}\nInput : {json.dumps(tc.input, indent=2)}"), trace_lines)
                 result = execute_tool(tc.name, tc.input)
-
-                _emit(_box(f"[Step {step}]  OBSERVATION", result), trace_lines)
-
-                tool_results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tc.id,
-                    "content": result,
-                })
-
+                self._emit(_box(f"[Step {step}]  OBSERVATION", result), trace_lines)
+                tool_results.append({"type": "tool_result", "tool_use_id": tc.id, "content": result})
             messages.append({"role": "user", "content": tool_results})
 
         else:
             final_answer = "[Max steps reached without a final answer]"
-            _emit(f"\n[WARNING] {final_answer}", trace_lines)
+            self._emit(f"\n[WARNING] {final_answer}", trace_lines)
 
         elapsed = time.time() - start_time
-        tools_summary = (
-            ", ".join(f"{k}×{v}" for k, v in sorted(tool_stats.items()))
-            or "none"
-        )
+        tools_summary = ", ".join(f"{k}×{v}" for k, v in sorted(tool_stats.items())) or "none"
         status = "✓ Success" if final_answer and not final_answer.startswith("[") else "✗ Incomplete"
+        self._emit(_summary_box(step, tools_summary, elapsed, status), trace_lines)
 
-        _emit(_summary_box(step, tools_summary, elapsed, status), trace_lines)
-
-        # ── Save PNG ───────────────────────────────────────────────────────────
         if save_trace:
             TRACE_DIR.mkdir(parents=True, exist_ok=True)
-            slug = "".join(c if c.isalnum() else "_" for c in query[:40]).strip("_")
-            ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-            png_path = TRACE_DIR / f"{ts}_{slug}.png"
+            slug     = "".join(c if c.isalnum() else "_" for c in query[:40]).strip("_")
+            png_path = TRACE_DIR / f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{slug}.png"
             png_ok   = _save_png(trace_lines, png_path)
-            png_note = png_path.name if png_ok else "(PNG skipped — install Pillow)"
-            print(f"\n[Saved → {png_note}]")
+            print(f"\n[Saved → {png_path.name if png_ok else '(PNG skipped — install Pillow)'}]")
 
         return final_answer
 
-    # ── Conversational loop ────────────────────────────────────────────────────
     def chat(self) -> None:
         """Start an interactive multi-turn conversation, maintaining history across turns."""
-        global _CHAT_MODE
-        _CHAT_MODE = True
-
+        self._chat_mode = True
         history: list[dict] = []
 
         print("\n" + "═" * _W)
@@ -411,23 +334,20 @@ class ReActAgent:
 
             print()
             answer = self.run(user_input, save_trace=False, _prior_messages=history)
-
-            # Keep only plain-text turns in history to avoid bloating context
-            # with tool_use / tool_result / thinking blocks from prior steps.
+            # Store only plain-text turns; tool_use/tool_result/thinking blocks stay out of history
             history.append({"role": "user", "content": user_input})
             history.append({"role": "assistant", "content": answer})
-
             print(f"\nAgent: {answer}\n")
+
+        self._chat_mode = False
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     """Parse CLI arguments and run the agent in chat, single-query, or demo mode."""
-    global _VERBOSE, _QUIET
-
     parser = argparse.ArgumentParser(
-        description="ReAct Agent — Claude claude-sonnet-4-6",
+        description="ReAct Agent",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -437,23 +357,15 @@ def main() -> None:
             "  python src/react_agent.py --verbose          # show thinking blocks in chat\n"
         ),
     )
-    parser.add_argument("--query", "-q", default=None,
-                        help="Run a single query and exit.")
-    parser.add_argument("--demo", action="store_true",
-                        help="Run all built-in demo queries and exit.")
-    parser.add_argument("--no-save", action="store_true",
-                        help="Skip saving trace files to screenshots/.")
-    parser.add_argument("--verbose", "-v", action="store_true",
-                        help="Show extended thinking (Thought) blocks.")
-    parser.add_argument("--quiet", action="store_true",
-                        help="Print only final answers (single-query / demo modes).")
+    parser.add_argument("--query",   "-q", default=None,      help="Run a single query and exit.")
+    parser.add_argument("--demo",          action="store_true", help="Run all built-in demo queries.")
+    parser.add_argument("--no-save",       action="store_true", help="Skip saving trace files.")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show extended thinking blocks.")
+    parser.add_argument("--quiet",         action="store_true", help="Print only final answers.")
     args = parser.parse_args()
 
-    _VERBOSE = args.verbose
-    _QUIET   = args.quiet
-    save     = not args.no_save
-
-    agent = ReActAgent()
+    agent = ReActAgent(verbose=args.verbose, quiet=args.quiet)
+    save  = not args.no_save
 
     if args.query:
         agent.run(args.query, save_trace=save)
@@ -462,8 +374,7 @@ def main() -> None:
         for i, q in enumerate(DEMO_QUERIES, 1):
             print(f"\n{'─' * _W}\n[Demo {i}/{len(DEMO_QUERIES)}]")
             agent.run(q, save_trace=save)
-        print(f"\n{'═' * _W}")
-        print("All demo queries complete. Check screenshots/ for traces.")
+        print(f"\n{'═' * _W}\nAll demo queries complete. Check screenshots/ for traces.")
     else:
         agent.chat()
 
