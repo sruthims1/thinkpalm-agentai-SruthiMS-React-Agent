@@ -11,14 +11,12 @@
 
 ## What It Does
 
-A **ReAct (Reasoning + Acting)** agent that interleaves step-by-step reasoning with real tool calls before producing a grounded final answer. The agent:
+A **ReAct (Reasoning + Acting)** agent powered by Claude Sonnet 4.6 that interleaves step-by-step reasoning with real tool calls — covering math, weather, web search, unit conversion, and Python execution — before delivering a grounded final answer. The agent supports both single-query and interactive conversational modes, with extended thinking enabled to make every reasoning step visible and auditable.
 
 1. **Thinks** — reasons about what information or computation it needs.
 2. **Acts** — calls the right tool; never guesses numbers or live facts.
 3. **Observes** — reads the tool result and decides if more steps are needed.
 4. **Answers** — gives a clear, accurate final answer backed by tool evidence.
-
-Screenshots of working output are saved in the `screenshots/` folder.
 
 ---
 
@@ -70,9 +68,11 @@ User Query
 ```
 React Agent/
 ├── src/
-│   ├── react_agent.py   # ReActAgent class, agentic loop, CLI
-│   └── tools.py         # All 7 tool schemas + implementations
-├── screenshots/         # Output screenshots
+│   ├── react_agent.py      # ReActAgent class, agentic loop, CLI
+│   └── tools.py            # All 7 tool schemas + implementations
+├── react_agent_chat.ipynb  # Interactive conversational mode notebook
+├── react_agent_colab.ipynb # Colab demo notebook
+├── screenshots/            # Output screenshots
 ├── README.md
 ├── requirements.txt
 └── .env.example
@@ -102,16 +102,22 @@ cp .env.example .env
 
 ### 3. Run the agent
 
-**All 8 demo queries (recommended for evaluation):**
+**Interactive conversational mode (default):**
 ```bash
 python src/react_agent.py
 ```
+Starts a multi-turn chat session. Type `exit` or `quit` to end.
 
 **Single custom query:**
 ```bash
 python src/react_agent.py -q "What is the square root of 144?"
 python src/react_agent.py -q "Weather in Tokyo?"
 python src/react_agent.py -q "Write Python to sort a list of strings alphabetically"
+```
+
+**All 8 demo queries:**
+```bash
+python src/react_agent.py --demo
 ```
 
 **Flags:**
